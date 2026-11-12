@@ -1051,6 +1051,11 @@ impl<'a> Model<'a> {
                             self.workbook.worksheets[sheet as usize].update_cell(r, c, new_cell)?;
                         }
                     }
+                    self.note_cells_written(
+                        sheet,
+                        row + original_height - 1,
+                        column + original_width - 1,
+                    );
                     // All cells (anchor + spills) have been written above.
                     return Ok(());
                 }
@@ -1178,6 +1183,7 @@ impl<'a> Model<'a> {
                     )?;
                 }
             }
+            self.note_cells_written(sheet, row + height - 1, column + width - 1);
         }
 
         // The formula cell is on the sheet already and only its value changes:
@@ -1235,6 +1241,7 @@ impl<'a> Model<'a> {
                     },
                 };
                 worksheet.update_cell(row, column, new_cell)?;
+                self.note_cells_written(sheet, row, column);
             }
         }
         Ok(())
@@ -1347,6 +1354,7 @@ impl<'a> Model<'a> {
         for (_, r, c) in clears {
             worksheet.cell_clear_contents(r, c)?;
         }
+        self.note_cells_written(sheet, row + height - 1, column + width - 1);
         Ok(None)
     }
 
