@@ -44,6 +44,10 @@ impl LookupVector {
         self.values.as_slice().get(index).unwrap_or(&EMPTY_CELL)
     }
 
+    pub(crate) fn filled_len(&self) -> usize {
+        self.values.filled_len()
+    }
+
     /// The first position whose value satisfies `predicate`. The cells that
     /// were not read are all empty: the first of them is the answer if no
     /// cell read is and an empty cell is.
@@ -146,6 +150,7 @@ pub(crate) struct SearchValues {
     values: Vec<CalcResult>,
     exact_searches: AtomicU32,
     indexes: [OnceLock<HashMap<ExactKey, Positions>>; Equality::COUNT],
+    filled_len: OnceLock<usize>,
 }
 
 impl From<Vec<CalcResult>> for SearchValues {
@@ -154,6 +159,7 @@ impl From<Vec<CalcResult>> for SearchValues {
             values,
             exact_searches: AtomicU32::new(0),
             indexes: Default::default(),
+            filled_len: OnceLock::new(),
         }
     }
 }
@@ -165,6 +171,15 @@ impl SearchValues {
 
     pub(crate) fn len(&self) -> usize {
         self.values.len()
+    }
+
+    fn filled_len(&self) -> usize {
+        *self.filled_len.get_or_init(|| {
+            self.values
+                .iter()
+                .rposition(|value| !matches!(value, CalcResult::EmptyCell))
+                .map_or(0, |last| last + 1)
+        })
     }
 
     /// The first position, or the last with `from_end`, of a value equal to
@@ -454,7 +469,7 @@ impl<'a> Model<'a> {
 pub(crate) fn binary_search_on_array(target: &CalcResult, array: &LookupVector) -> i32 {
     // We apply binary search leftmost for value in the array
     let mut l = 0;
-    let mut r = array.len();
+    let mut r = array.filled_len();
     while l < r {
         let m = (l + r) / 2;
         match compare_values(array.get(m), target) {
