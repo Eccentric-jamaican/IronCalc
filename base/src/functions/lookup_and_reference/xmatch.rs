@@ -3,6 +3,8 @@ use regex::Regex;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use regex_lite::Regex;
 
+use std::sync::Arc;
+
 use crate::expressions::types::CellReferenceIndex;
 use crate::{
     calc_result::CalcResult, expressions::parser::Node, expressions::token::Error, model::Model,
@@ -11,7 +13,7 @@ use crate::{
 use crate::functions::{
     binary_search::{
         binary_search_descending_or_greater, binary_search_descending_or_smaller,
-        binary_search_or_greater, binary_search_or_smaller,
+        binary_search_or_greater, binary_search_or_smaller, Equality, SearchValues,
     },
     util::{compare_values, from_wildcard_to_regex, result_matches_regex},
 };
@@ -205,7 +207,7 @@ impl<'a> Model<'a> {
         // Materialise `lookup_array` into a one-dimensional vector of values.
         // It may be a range reference or an in-formula array constant `{…}`;
         // either way it must be a single row or single column.
-        let array: Vec<CalcResult> = match self.evaluate_node_in_context(&args[1], cell) {
+        let array: Arc<SearchValues> = match self.evaluate_node_in_context(&args[1], cell) {
             CalcResult::Range { left, right } => {
                 let is_col_vec = left.column == right.column;
                 let is_row_vec = left.row == right.row;
@@ -232,7 +234,7 @@ impl<'a> Model<'a> {
                     row: row2,
                     column: col2,
                 };
-                self.prepare_array(&left, &right, is_col_vec)
+                self.shared_array(&left, &right, is_col_vec)
             }
             CalcResult::Array(rows) => {
                 // An array constant must be a single row or single column.
@@ -247,10 +249,12 @@ impl<'a> Model<'a> {
                         "lookup_array must be a single row or column".to_string(),
                     );
                 }
-                rows.iter()
-                    .flatten()
-                    .map(|node| super::array_node_to_calc_result(node, cell))
-                    .collect()
+                Arc::new(SearchValues::from(
+                    rows.iter()
+                        .flatten()
+                        .map(|node| super::array_node_to_calc_result(node, cell))
+                        .collect::<Vec<_>>(),
+                ))
             }
             error @ CalcResult::Error { .. } => return error,
             _ => {
@@ -275,7 +279,21 @@ impl<'a> Model<'a> {
                         }
                     }
                 }
-                match linear_search(&lookup_value, &array, &search_mode, match_mode) {
+                let indexed = match match_mode {
+                    MatchMode::Exact => array.exact_position(
+                        Equality::compared(&lookup_value),
+                        &lookup_value,
+                        search_mode == SearchMode::LastToFirst,
+                    ),
+                    _ => None,
+                };
+                let found = match indexed {
+                    Some(found) => found,
+                    None => {
+                        linear_search(&lookup_value, array.as_slice(), &search_mode, match_mode)
+                    }
+                };
+                match found {
                     Some(idx) => CalcResult::Number(idx as f64 + 1.0),
                     None => CalcResult::new_error(Error::NA, cell, "Not found".to_string()),
                 }
@@ -290,21 +308,21 @@ impl<'a> Model<'a> {
                 }
                 let idx_opt = if match_mode == MatchMode::ExactMatchLarger {
                     if search_mode == SearchMode::BinaryAscending {
-                        binary_search_or_greater(&lookup_value, &array)
+                        binary_search_or_greater(&lookup_value, array.as_slice())
                     } else {
-                        binary_search_descending_or_greater(&lookup_value, &array)
+                        binary_search_descending_or_greater(&lookup_value, array.as_slice())
                     }
                 } else if search_mode == SearchMode::BinaryAscending {
-                    binary_search_or_smaller(&lookup_value, &array)
+                    binary_search_or_smaller(&lookup_value, array.as_slice())
                 } else {
-                    binary_search_descending_or_smaller(&lookup_value, &array)
+                    binary_search_descending_or_smaller(&lookup_value, array.as_slice())
                 };
 
                 match idx_opt {
                     None => CalcResult::new_error(Error::NA, cell, "Not found".to_string()),
                     Some(l) => {
                         if match_mode == MatchMode::Exact {
-                            let v = &array[l as usize];
+                            let v = &array.as_slice()[l as usize];
                             if compare_values(v, &lookup_value) != 0 {
                                 return CalcResult::new_error(
                                     Error::NA,

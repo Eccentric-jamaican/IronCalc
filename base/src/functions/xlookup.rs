@@ -6,7 +6,7 @@ use crate::{
 use super::{
     binary_search::{
         binary_search_descending_or_greater, binary_search_descending_or_smaller,
-        binary_search_or_greater, binary_search_or_smaller,
+        binary_search_or_greater, binary_search_or_smaller, Equality,
     },
     util::{compare_values, from_wildcard_to_regex, result_matches_regex},
 };
@@ -269,8 +269,25 @@ impl<'a> Model<'a> {
                         };
                         match search_mode {
                             SearchMode::StartAtFirstItem | SearchMode::StartAtLastItem => {
-                                let array = &self.prepare_array(&left, &right, is_row_vector);
-                                match linear_search(&lookup_value, array, search_mode, match_mode) {
+                                let array = self.shared_array(&left, &right, is_row_vector);
+                                let indexed = match match_mode {
+                                    MatchMode::ExactMatch => array.exact_position(
+                                        Equality::compared(&lookup_value),
+                                        &lookup_value,
+                                        search_mode == SearchMode::StartAtLastItem,
+                                    ),
+                                    _ => None,
+                                };
+                                let found = match indexed {
+                                    Some(found) => found,
+                                    None => linear_search(
+                                        &lookup_value,
+                                        array.as_slice(),
+                                        search_mode,
+                                        match_mode,
+                                    ),
+                                };
+                                match found {
                                     Some(index) => {
                                         let row_index =
                                             if is_row_vector { index as i32 } else { 0 };
@@ -291,23 +308,25 @@ impl<'a> Model<'a> {
                                     if search_mode == SearchMode::BinarySearchAscending {
                                         binary_search_or_greater(
                                             &lookup_value,
-                                            &self.prepare_array(&left, &right, is_row_vector),
+                                            self.shared_array(&left, &right, is_row_vector)
+                                                .as_slice(),
                                         )
                                     } else {
                                         binary_search_descending_or_greater(
                                             &lookup_value,
-                                            &self.prepare_array(&left, &right, is_row_vector),
+                                            self.shared_array(&left, &right, is_row_vector)
+                                                .as_slice(),
                                         )
                                     }
                                 } else if search_mode == SearchMode::BinarySearchAscending {
                                     binary_search_or_smaller(
                                         &lookup_value,
-                                        &self.prepare_array(&left, &right, is_row_vector),
+                                        self.shared_array(&left, &right, is_row_vector).as_slice(),
                                     )
                                 } else {
                                     binary_search_descending_or_smaller(
                                         &lookup_value,
-                                        &self.prepare_array(&left, &right, is_row_vector),
+                                        self.shared_array(&left, &right, is_row_vector).as_slice(),
                                     )
                                 };
                                 match index {

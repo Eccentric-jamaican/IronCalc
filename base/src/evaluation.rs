@@ -46,6 +46,7 @@ use crate::calc_result::CalcResult;
 use crate::constants::{LAST_COLUMN, LAST_ROW};
 use crate::expressions::token::Error;
 use crate::expressions::types::CellReferenceIndex;
+use crate::functions::binary_search::SearchValues;
 use crate::model::Model;
 use crate::types::{ArrayKind, Cell, Worksheet};
 
@@ -400,6 +401,15 @@ pub(crate) struct Evaluation {
     /// Finding it walks every cell of the sheet, so it is found once a pass,
     /// and kept up to date as the pass writes cells (`note_cells_written`).
     pub(crate) used_areas: HashMap<u32, (i32, i32)>,
+    /// The vectors lookup functions read in the current pass, by range, so
+    /// that lookups over the same range share one read (`Model::shared_array`).
+    pub(crate) lookup_vectors: HashMap<LookupKey, Arc<SearchValues>>,
+    /// How many cells `lookup_vectors` holds, kept below
+    /// `MAX_LOOKUP_VECTOR_CELLS`.
+    pub(crate) lookup_vector_cells: usize,
+    /// Number of vectors lookups read from the sheet in the last pass, rather
+    /// than shared. For tests and tuning.
+    pub(crate) lookup_vectors_read: u32,
     /// Set when the current pass must be abandoned. Every evaluation in
     /// progress then returns without storing anything.
     pub(crate) restart: Option<Restart>,
@@ -435,6 +445,24 @@ pub(crate) struct Evaluation {
 /// what the smallest common stacks hold (1 MB in WebAssembly, 2 MB for a
 /// thread) and cost nothing to workbooks that never reach them.
 const DEFAULT_MAX_DEPTH: usize = 64;
+
+/// The most cells the lookup vectors of one pass may hold together. Lookups
+/// over the same few ranges stay well below it. Many ranges that each differ
+/// a little (a relative range copied down a column) would otherwise keep a
+/// copy of nearly the same cells for every formula; past the limit a vector is
+/// read and not kept, as it would be with no sharing at all.
+const MAX_LOOKUP_VECTOR_CELLS: usize = 1 << 20;
+
+/// The cells a lookup vector was read from, as given to `prepare_array`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct LookupKey {
+    pub(crate) sheet: u32,
+    pub(crate) row1: i32,
+    pub(crate) column1: i32,
+    pub(crate) row2: i32,
+    pub(crate) column2: i32,
+    pub(crate) is_row_vector: bool,
+}
 const DEFAULT_MAX_STACK: usize = 256 * 1024;
 
 /// Roughly where the stack is: the address of a local.
@@ -469,6 +497,9 @@ impl Default for Evaluation {
             seen: HashMap::default(),
             seen_ranges: Vec::new(),
             used_areas: HashMap::new(),
+            lookup_vectors: HashMap::new(),
+            lookup_vector_cells: 0,
+            lookup_vectors_read: 0,
             restart: None,
             in_pass: false,
             restarts_in_last_evaluation: 0,
@@ -484,6 +515,17 @@ impl Default for Evaluation {
 impl Evaluation {
     /// See `Model::record_seen`. Here so that a read can be put on record
     /// while the sheet it was made in is still borrowed.
+    /// Keeps a lookup vector read in this pass for the next lookup over the
+    /// same range, unless that would take the vectors kept past
+    /// `MAX_LOOKUP_VECTOR_CELLS`.
+    pub(crate) fn keep_lookup_vector(&mut self, key: LookupKey, values: &Arc<SearchValues>) {
+        if self.lookup_vector_cells + values.len() > MAX_LOOKUP_VECTOR_CELLS {
+            return;
+        }
+        self.lookup_vector_cells += values.len();
+        self.lookup_vectors.insert(key, values.clone());
+    }
+
     pub(crate) fn record_seen(&mut self, position: CellReferenceIndex, seen: Seen) {
         if !self.in_pass {
             return;
@@ -699,6 +741,9 @@ impl<'a> Model<'a> {
         state.seen_ranges.clear();
         // What an abandoned pass wrote is undone before the next one starts.
         state.used_areas.clear();
+        state.lookup_vectors.clear();
+        state.lookup_vector_cells = 0;
+        state.lookup_vectors_read = 0;
         state.restart = None;
         state.depth = 0;
         state.unwinding = false;
@@ -722,6 +767,8 @@ impl<'a> Model<'a> {
         }
         self.evaluation.in_pass = false;
         self.evaluation.root = None;
+        self.evaluation.lookup_vectors.clear();
+        self.evaluation.lookup_vector_cells = 0;
         restart
     }
 

@@ -1,8 +1,15 @@
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+use std::sync::{Arc, OnceLock};
 
-use crate::{calc_result::CalcResult, expressions::types::CellReferenceIndex, model::Model};
+use crate::{
+    calc_result::CalcResult, evaluation::LookupKey, expressions::types::CellReferenceIndex,
+    model::Model,
+};
 
 use super::util::compare_values;
+use crate::number_format::to_excel_precision;
 
 static EMPTY_CELL: CalcResult = CalcResult::EmptyCell;
 
@@ -12,15 +19,19 @@ static EMPTY_CELL: CalcResult = CalcResult::EmptyCell;
 /// and are not read one by one. They still take part in the search. `len` is
 /// the length of the whole vector and `get` gives `EmptyCell` past what was
 /// read, so a search finds what it would have found had every cell been read.
+#[derive(Clone)]
 pub(crate) struct LookupVector {
-    values: Vec<CalcResult>,
+    values: Arc<SearchValues>,
     len: usize,
 }
 
 impl From<Vec<CalcResult>> for LookupVector {
     fn from(values: Vec<CalcResult>) -> Self {
         let len = values.len();
-        LookupVector { values, len }
+        LookupVector {
+            values: Arc::new(values.into()),
+            len,
+        }
     }
 }
 
@@ -30,20 +41,168 @@ impl LookupVector {
     }
 
     pub(crate) fn get(&self, index: usize) -> &CalcResult {
-        self.values.get(index).unwrap_or(&EMPTY_CELL)
+        self.values.as_slice().get(index).unwrap_or(&EMPTY_CELL)
     }
 
     /// The first position whose value satisfies `predicate`. The cells that
     /// were not read are all empty: the first of them is the answer if no
     /// cell read is and an empty cell is.
     pub(crate) fn position(&self, predicate: impl Fn(&CalcResult) -> bool) -> Option<usize> {
-        if let Some(index) = self.values.iter().position(&predicate) {
+        let values = self.values.as_slice();
+        if let Some(index) = values.iter().position(&predicate) {
             return Some(index);
         }
-        if self.values.len() < self.len && predicate(&EMPTY_CELL) {
-            return Some(self.values.len());
+        if values.len() < self.len && predicate(&EMPTY_CELL) {
+            return Some(values.len());
         }
         None
+    }
+
+    /// `SearchValues::exact_position`. A value it finds is never empty, so
+    /// the cells that were not read take no part.
+    pub(crate) fn exact_position(
+        &self,
+        equality: Equality,
+        target: &CalcResult,
+    ) -> Option<Option<usize>> {
+        self.values.exact_position(equality, target, false)
+    }
+}
+
+/// A way a lookup function tells that a value equals the one it looks for,
+/// for the values where a hash of the value tells the same.
+#[derive(Clone, Copy)]
+pub(crate) enum Equality {
+    /// `result_matches_regex` with the pattern of a text with no wildcard in
+    /// it: the same text, ignoring case as `to_lowercase` does.
+    LowercaseText,
+    /// `compare_values` or `values_are_equal` on texts: the same text,
+    /// ignoring case as `to_uppercase` does. The empty text equals an empty
+    /// cell, so it is left out.
+    UppercaseText,
+    /// `compare_values` on numbers: equal to 15 significant digits.
+    RoundedNumber,
+    /// `values_are_equal` on numbers.
+    Number,
+}
+
+impl Equality {
+    const COUNT: usize = 4;
+
+    /// The equality of `compare_values(value, target) == 0`.
+    pub(crate) fn compared(target: &CalcResult) -> Equality {
+        match target {
+            CalcResult::String(_) => Equality::UppercaseText,
+            _ => Equality::RoundedNumber,
+        }
+    }
+
+    /// The key of `value` under this equality: two values with a key are
+    /// equal if and only if their keys are. A number below 2 in size has
+    /// none, since two different numbers there can be closer than
+    /// `f64::EPSILON`, which the comparisons take as equal.
+    fn key(self, value: &CalcResult) -> Option<ExactKey> {
+        match (self, value) {
+            (Equality::LowercaseText, CalcResult::String(text))
+                if !text.contains(['*', '?', '~']) =>
+            {
+                Some(ExactKey::Text(text.to_lowercase()))
+            }
+            (Equality::UppercaseText, CalcResult::String(text)) if !text.is_empty() => {
+                Some(ExactKey::Text(text.to_uppercase()))
+            }
+            (Equality::RoundedNumber, CalcResult::Number(number)) => {
+                number_key(to_excel_precision(*number, 15))
+            }
+            (Equality::Number, CalcResult::Number(number)) => number_key(*number),
+            _ => None,
+        }
+    }
+}
+
+fn number_key(number: f64) -> Option<ExactKey> {
+    (number.is_finite() && number.abs() >= 2.0).then(|| ExactKey::Number(number.to_bits()))
+}
+
+#[derive(PartialEq, Eq, Hash)]
+enum ExactKey {
+    Text(String),
+    Number(u64),
+}
+
+/// The first and last positions of a key.
+struct Positions {
+    first: usize,
+    last: usize,
+}
+
+/// The values a lookup function searches, with what makes searching them
+/// again quick. Within a pass, every lookup over the same range gets the
+/// values the first one read (`Model::shared_array`). From the second exact
+/// search on, a value is found through an index of the values by key
+/// (`Equality::key`), built the first time it is needed, rather than by
+/// comparing it with every value in turn.
+pub(crate) struct SearchValues {
+    values: Vec<CalcResult>,
+    exact_searches: AtomicU32,
+    indexes: [OnceLock<HashMap<ExactKey, Positions>>; Equality::COUNT],
+}
+
+impl From<Vec<CalcResult>> for SearchValues {
+    fn from(values: Vec<CalcResult>) -> Self {
+        SearchValues {
+            values,
+            exact_searches: AtomicU32::new(0),
+            indexes: Default::default(),
+        }
+    }
+}
+
+impl SearchValues {
+    pub(crate) fn as_slice(&self) -> &[CalcResult] {
+        &self.values
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// The first position, or the last with `from_end`, of a value equal to
+    /// `target` under `equality`, as a search comparing it with every value
+    /// would find it. `None` when the index is not used: for the first
+    /// search, or when `target` has no key. The caller searches then.
+    pub(crate) fn exact_position(
+        &self,
+        equality: Equality,
+        target: &CalcResult,
+        from_end: bool,
+    ) -> Option<Option<usize>> {
+        let key = equality.key(target)?;
+        if self.exact_searches.fetch_add(1, AtomicOrdering::Relaxed) == 0 {
+            return None;
+        }
+        let index = self.indexes[equality as usize].get_or_init(|| {
+            let mut index: HashMap<ExactKey, Positions> = HashMap::new();
+            for (position, value) in self.values.iter().enumerate() {
+                if let Some(key) = equality.key(value) {
+                    index
+                        .entry(key)
+                        .and_modify(|positions| positions.last = position)
+                        .or_insert(Positions {
+                            first: position,
+                            last: position,
+                        });
+                }
+            }
+            index
+        });
+        Some(index.get(&key).map(|positions| {
+            if from_end {
+                positions.last
+            } else {
+                positions.first
+            }
+        }))
     }
 }
 
@@ -236,9 +395,56 @@ impl<'a> Model<'a> {
             column,
         };
         Ok(LookupVector {
-            values: self.prepare_array(left, &right, is_row_vector),
+            values: self.shared_array(left, &right, is_row_vector),
             len: len as usize,
         })
+    }
+
+    /// `prepare_array` for a function that searches the vector, read once in
+    /// a pass and shared by every search of the same vector after it
+    /// (`Evaluation::lookup_vectors`), so that a column searched by many
+    /// formulas is not read again for each of them. A cell keeps its value for
+    /// the rest of a pass once it has been read: a spill that would change a
+    /// cell some formula has read restarts the pass, and a restart starts with
+    /// no vectors kept. A whole column or row must have been clipped to the
+    /// used area already, so that what the vector skips is on record for every
+    /// reader (`clip_to_used_area`).
+    pub(crate) fn shared_array(
+        &mut self,
+        left: &CellReferenceIndex,
+        right: &CellReferenceIndex,
+        is_row_vector: bool,
+    ) -> Arc<SearchValues> {
+        let key = LookupKey {
+            sheet: left.sheet,
+            row1: left.row,
+            column1: left.column,
+            row2: right.row,
+            column2: right.column,
+            is_row_vector,
+        };
+        if !self.evaluation.in_pass {
+            return Arc::new(self.prepare_array(left, right, is_row_vector).into());
+        }
+        if let Some(values) = self.evaluation.lookup_vectors.get(&key) {
+            return values.clone();
+        }
+        let read_while_running = self.evaluation.stack.iter().any(|cell| {
+            cell.sheet == key.sheet
+                && (key.row1..=key.row2).contains(&cell.row)
+                && (key.column1..=key.column2).contains(&cell.column)
+        });
+        let values = Arc::new(SearchValues::from(self.prepare_array(
+            left,
+            right,
+            is_row_vector,
+        )));
+        self.evaluation.lookup_vectors_read += 1;
+        let complete = !self.evaluation.unwinding && self.evaluation.restart.is_none();
+        if complete && !read_while_running {
+            self.evaluation.keep_lookup_vector(key, &values);
+        }
+        values
     }
 }
 

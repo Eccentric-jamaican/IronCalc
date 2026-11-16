@@ -7,7 +7,7 @@ use crate::{
     utils::ParsedReference,
 };
 
-use super::binary_search::{binary_search_on_array, LookupVector};
+use super::binary_search::{binary_search_on_array, Equality, LookupVector};
 use super::util::{compare_values, from_wildcard_to_regex, result_matches_regex, values_are_equal};
 
 mod address_areas;
@@ -150,6 +150,13 @@ fn lookup_index(
             l => Some(l as usize),
         }
     } else {
+        let equality = match lookup_value {
+            CalcResult::String(_) => Equality::LowercaseText,
+            _ => Equality::RoundedNumber,
+        };
+        if let Some(found) = search_vector.exact_position(equality, lookup_value) {
+            return found;
+        }
         let result_matches: Box<dyn Fn(&CalcResult) -> bool> =
             if let CalcResult::String(s) = lookup_value {
                 if let Ok(reg) = from_wildcard_to_regex(&s.to_lowercase(), true) {
@@ -483,18 +490,27 @@ impl<'a> Model<'a> {
                 CalcResult::Number(l as f64)
             }
             0 => {
-                // We apply linear search
-                let result_matches: Box<dyn Fn(&CalcResult) -> bool> =
-                    if let CalcResult::String(s) = &target {
-                        if let Ok(reg) = from_wildcard_to_regex(&s.to_lowercase(), true) {
-                            Box::new(move |x| result_matches_regex(x, &reg))
-                        } else {
-                            Box::new(move |_| false)
-                        }
-                    } else {
-                        Box::new(move |x| values_are_equal(x, &target))
-                    };
-                if let Some(l) = values.position(result_matches) {
+                let equality = match &target {
+                    CalcResult::String(_) => Equality::LowercaseText,
+                    _ => Equality::Number,
+                };
+                let found = match values.exact_position(equality, &target) {
+                    Some(found) => found,
+                    None => {
+                        let result_matches: Box<dyn Fn(&CalcResult) -> bool> =
+                            if let CalcResult::String(s) = &target {
+                                if let Ok(reg) = from_wildcard_to_regex(&s.to_lowercase(), true) {
+                                    Box::new(move |x| result_matches_regex(x, &reg))
+                                } else {
+                                    Box::new(move |_| false)
+                                }
+                            } else {
+                                Box::new(move |x| values_are_equal(x, &target))
+                            };
+                        values.position(result_matches)
+                    }
+                };
+                if let Some(l) = found {
                     return CalcResult::Number(l as f64 + 1.0);
                 }
                 CalcResult::Error {
