@@ -16,6 +16,7 @@ mod test_days_days360;
 mod test_degrees_radians;
 mod test_ecma_ceiling;
 mod test_error_propagation;
+mod test_evaluate_changed;
 mod test_fact_factdouble;
 mod test_fn_accrint;
 mod test_fn_accrintm;

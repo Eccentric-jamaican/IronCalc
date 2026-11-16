@@ -615,6 +615,7 @@ impl<'a> Model<'a> {
         column: i32,
         column_count: i32,
     ) -> Result<(), String> {
+        self.evaluation.dependencies.clear();
         if column_count <= 0 {
             return Err("Cannot add a negative number of cells :)".to_string());
         }
@@ -733,6 +734,7 @@ impl<'a> Model<'a> {
         column: i32,
         column_count: i32,
     ) -> Result<(), String> {
+        self.evaluation.dependencies.clear();
         if column_count <= 0 {
             return Err("Please use insert columns instead".to_string());
         }
@@ -1003,6 +1005,7 @@ impl<'a> Model<'a> {
     /// * `row` - The index at which the new rows should be inserted.
     /// * `row_count` - The number of rows to insert.
     pub fn insert_rows(&mut self, sheet: u32, row: i32, row_count: i32) -> Result<(), String> {
+        self.evaluation.dependencies.clear();
         if row_count <= 0 {
             return Err("Cannot add a negative number of cells :)".to_string());
         }
@@ -1106,6 +1109,7 @@ impl<'a> Model<'a> {
     /// * `row` - The index of the first row to delete.
     /// * `row_count` - The number of rows to delete.
     pub fn delete_rows(&mut self, sheet: u32, row: i32, row_count: i32) -> Result<(), String> {
+        self.evaluation.dependencies.clear();
         if row_count <= 0 {
             return Err("Please use insert rows instead".to_string());
         }
@@ -1685,6 +1689,7 @@ impl<'a> Model<'a> {
         column_count: i32,
         delta: i32,
     ) -> Result<(), String> {
+        self.evaluation.dependencies.clear();
         if column_count <= 0 || delta == 0 {
             return Ok(());
         }
@@ -1764,6 +1769,7 @@ impl<'a> Model<'a> {
         row_count: i32,
         delta: i32,
     ) -> Result<(), String> {
+        self.evaluation.dependencies.clear();
         if row_count <= 0 || delta == 0 {
             return Ok(());
         }

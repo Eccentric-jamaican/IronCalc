@@ -293,6 +293,14 @@ impl<'a> Model<'a> {
         node: &Node,
         cell: CellReferenceIndex,
     ) -> CalcResult {
+        let result = self.reference_unrecorded(node, cell);
+        if let CalcResult::Range { left, right } = &result {
+            self.note_area_read(*left, *right);
+        }
+        result
+    }
+
+    fn reference_unrecorded(&mut self, node: &Node, cell: CellReferenceIndex) -> CalcResult {
         match node {
             Node::ReferenceKind {
                 sheet_name: _,
@@ -662,6 +670,14 @@ impl<'a> Model<'a> {
         node: &Node,
         cell: CellReferenceIndex,
     ) -> CalcResult {
+        let result = self.value_unrecorded(node, cell);
+        if let CalcResult::Range { left, right } = &result {
+            self.note_area_read(*left, *right);
+        }
+        result
+    }
+
+    fn value_unrecorded(&mut self, node: &Node, cell: CellReferenceIndex) -> CalcResult {
         use Node::*;
         match node {
             OpSumKind { kind, left, right } => match kind {
@@ -1973,6 +1989,7 @@ impl<'a> Model<'a> {
         target: &CellReferenceIndex,
         area: &Area,
     ) -> Result<String, String> {
+        self.evaluation.dependencies.clear();
         let source_sheet_name = self
             .workbook
             .worksheet(source.sheet)
@@ -3594,6 +3611,7 @@ impl<'a> Model<'a> {
         scope: Option<u32>,
         formula: &str,
     ) -> Result<(), String> {
+        self.evaluation.dependencies.clear();
         let sheet_id = self.is_valid_defined_name(name, scope, formula)?;
         // Defined-name formulas are stored internally in English so they keep
         // working when the user switches language/locale.
@@ -3689,6 +3707,7 @@ impl<'a> Model<'a> {
 
     /// Delete defined name of name and scope
     pub fn delete_defined_name(&mut self, name: &str, scope: Option<u32>) -> Result<(), String> {
+        self.evaluation.dependencies.clear();
         let name_upper = name.to_uppercase();
         let defined_names = &self.workbook.defined_names;
         let sheet_id = match scope {
@@ -3719,6 +3738,7 @@ impl<'a> Model<'a> {
         new_scope: Option<u32>,
         new_formula: &str,
     ) -> Result<(), String> {
+        self.evaluation.dependencies.clear();
         if !is_valid_identifier(new_name) {
             return Err("Name: Invalid defined name".to_string());
         };
