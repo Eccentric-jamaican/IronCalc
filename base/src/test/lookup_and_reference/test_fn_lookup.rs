@@ -128,9 +128,9 @@ fn test_lookup_array_form_range_wide() {
     assert_eq!(model._get_text("E1"), "y");
 }
 
-// Whole columns are read only as far as the sheet's used area. The cells past
-// it are still searched, as empty cells: A4's search runs to the last row, and
-// the result column gives the empty cell there, as when every cell was read.
+// Whole columns are read only as far as the sheet's used area. The search
+// stops at the last value, as Excel's does, so A4 finds 20 and not an empty
+// cell further down.
 #[test]
 fn test_lookup_vector_form_whole_columns() {
     let mut model = new_empty_model();
@@ -148,5 +148,5 @@ fn test_lookup_vector_form_whole_columns() {
     assert_eq!(model._get_text("A1"), "#N/A");
     assert_eq!(model._get_text("A2"), "b");
     assert_eq!(model._get_text("A3"), "c");
-    assert_eq!(model._get_text("A4"), "0");
+    assert_eq!(model._get_text("A4"), "b");
 }

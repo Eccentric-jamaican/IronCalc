@@ -12,3 +12,4 @@ mod test_fn_vlookup;
 mod test_fn_wrapcols_wraprows;
 mod test_fn_xmatch;
 mod test_shared_lookup_vectors;
+mod test_sorted_lookups;

@@ -99,9 +99,8 @@ fn a_whole_column_match_records_one_rectangle() {
 
 // The cells past the used area are not read but they are still searched, as
 // empty cells, so every match type answers as it did when each cell was read.
-// An approximate search meets them first and runs to the last row. (Excel's
-// binary search skips trailing empty cells and would answer 2 to A1; that is
-// a separate difference.)
+// An approximate search stops at the last value, as Excel's does, so the empty
+// cells after it do not change its answer.
 #[test]
 fn a_whole_column_match_still_searches_the_cells_past_the_used_area() {
     let mut model = new_empty_model();
@@ -113,12 +112,13 @@ fn a_whole_column_match_still_searches_the_cells_past_the_used_area() {
     model._set("A3", "=MATCH(25,D:D,0)");
     model._set("A4", "=MATCH(25,D:D,-1)");
     model._set("A5", "=MATCH(20,1:1,0)");
+    model._set("A6", "=MATCH(25,D1:D3,-1)");
     model._set("E1", "20");
     model.evaluate();
-    assert_eq!(model._get_text("A1"), "1048576");
+    assert_eq!(model._get_text("A1"), "2");
     assert_eq!(model._get_text("A2"), "2");
     assert_eq!(model._get_text("A3"), "#N/A");
-    assert_eq!(model._get_text("A4"), "3");
+    assert_eq!(model._get_text("A4"), model._get_text("A6"));
     assert_eq!(model._get_text("A5"), "5");
 }
 
